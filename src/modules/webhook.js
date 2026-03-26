@@ -40,6 +40,8 @@ async function handleIncomingMessage(req, res) {
 
   // Get the full conversation history and send it to Claude
   const history = getHistory(from);
+
+  console.log('🔄 Calling Claude...'); 
   const reply = await askClaude(history);
 
   // Add Claude's reply to history so future messages have full context
