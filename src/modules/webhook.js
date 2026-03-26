@@ -5,6 +5,7 @@ const { TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_WHATSAPP_NUMBER } = requir
 const { askClaude } = require('./claude');
 const { getHistory, addMessage, clearHistory } = require('./memory');
 const { saveResume, tailorResume } = require('./resume');
+const { generateCoverLetter } = require('./coverLetter'); // NEW
 
 const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 
@@ -22,14 +23,6 @@ async function sendMessage(to, text) {
   });
 }
 
-/**
- * Detects what the user is trying to do based on their message.
- * This is a simple keyword-based intent detector.
- * In Step 9 we'll upgrade this to use Claude for smarter routing.
- *
- * @param {string} message - the user's message text
- * @returns {string} - the detected intent
- */
 function detectIntent(message) {
   const msg = message.toLowerCase();
 
@@ -39,11 +32,17 @@ function detectIntent(message) {
   if (msg.includes('tailor my resume') || msg.includes('tailor resume')) {
     return 'TAILOR_RESUME';
   }
+
+  // NEW — detect cover letter requests
+  if (msg.includes('cover letter') || msg.includes('write me a cover letter')) {
+    return 'COVER_LETTER';
+  }
+
   if (msg.trim() === 'reset') {
     return 'RESET';
   }
 
-  return 'GENERAL'; // falls through to Claude's general conversation
+  return 'GENERAL';
 }
 
 async function handleIncomingMessage(req, res) {
@@ -64,10 +63,7 @@ async function handleIncomingMessage(req, res) {
     }
 
     // --- SAVE RESUME ---
-    // User sends their resume text with a trigger phrase like
-    // "save my resume" or "here is my resume"
     if (intent === 'SAVE_RESUME') {
-      // Extract just the resume part — everything after the trigger phrase
       const resumeText = body
         .replace(/save my resume/i, '')
         .replace(/here is my resume/i, '')
@@ -85,18 +81,16 @@ async function handleIncomingMessage(req, res) {
     }
 
     // --- TAILOR RESUME ---
-    // User pastes a job description and asks for tailoring
     if (intent === 'TAILOR_RESUME') {
       await sendMessage(from, '⏳ Tailoring your resume, give me a moment...');
 
-      // Extract the job description — everything after the trigger phrase
       const jobDescription = body
         .replace(/tailor my resume/i, '')
         .replace(/tailor resume/i, '')
         .trim();
 
       if (jobDescription.length < 20) {
-        await sendMessage(from, 'Please paste the job description after "tailor my resume". Example:\n\n"tailor my resume\n[paste job description here]"');
+        await sendMessage(from, 'Please paste the job description after "tailor my resume".');
         return;
       }
 
@@ -105,8 +99,27 @@ async function handleIncomingMessage(req, res) {
       return;
     }
 
+    // --- COVER LETTER --- NEW
+    if (intent === 'COVER_LETTER') {
+      await sendMessage(from, '⏳ Writing your cover letter, give me a moment...');
+
+      // Extract job description — everything after the trigger phrase
+      const jobDescription = body
+        .replace(/write me a cover letter/i, '')
+        .replace(/cover letter/i, '')
+        .trim();
+
+      if (jobDescription.length < 20) {
+        await sendMessage(from, 'Please paste the job description after "cover letter". Example:\n\n"cover letter\n[paste job description here]"');
+        return;
+      }
+
+      const letter = await generateCoverLetter(from, jobDescription);
+      await sendMessage(from, `✅ Here is your cover letter:\n\n${letter}`);
+      return;
+    }
+
     // --- GENERAL CONVERSATION ---
-    // Falls through to Claude for everything else
     addMessage(from, 'user', body);
     const history = getHistory(from);
     const reply = await askClaude(history);
