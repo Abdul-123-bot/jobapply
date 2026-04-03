@@ -103,7 +103,19 @@ Available intents and their data fields:
     - User wants to see their list of pending job cards awaiting a decision
     - data: {}
 
-21. GENERAL
+21. SET_PROFILE
+    - User is providing personal info for job application forms
+    - Fields: full_name, email, phone, location, work_auth, linkedin_url, portfolio_url
+    - For credentials say "set linkedin login email:x password:y" or "set indeed login email:x password:y"
+    - data: { "field": "full_name|email|phone|location|work_auth|linkedin_url|portfolio_url|linkedin_creds|indeed_creds", "value": "the value they provided" }
+    - For linkedin_creds: value = "email:x|password:y"
+    - For indeed_creds: value = "email:x|password:y"
+
+22. VIEW_PROFILE
+    - User wants to see their saved profile info
+    - data: {}
+
+23. GENERAL
     - Message doesn't match any of the above
     - data: {}
 
@@ -143,6 +155,24 @@ Response: {"intent":"SKIP_JOB","data":{"jobId":"JOB-003"}}
 
 User: "show my pending jobs"
 Response: {"intent":"VIEW_PENDING","data":{}}
+
+User: "my name is Abdul Kareem Arbaz"
+Response: {"intent":"SET_PROFILE","data":{"field":"full_name","value":"Abdul Kareem Arbaz"}}
+
+User: "my email is user@example.com"
+Response: {"intent":"SET_PROFILE","data":{"field":"email","value":"user@example.com"}}
+
+User: "I'm based in Austin Texas"
+Response: {"intent":"SET_PROFILE","data":{"field":"location","value":"Austin, TX"}}
+
+User: "I have OPT EAD work authorization"
+Response: {"intent":"SET_PROFILE","data":{"field":"work_auth","value":"OPT/EAD"}}
+
+User: "set linkedin login email:user@email.com password:mypass123"
+Response: {"intent":"SET_PROFILE","data":{"field":"linkedin_creds","value":"email:user@email.com|password:mypass123"}}
+
+User: "show my profile"
+Response: {"intent":"VIEW_PROFILE","data":{}}
 
 Return ONLY the JSON object. No explanation. No markdown. No backticks.
 `;

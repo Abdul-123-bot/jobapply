@@ -11,6 +11,8 @@ const { detectIntent } = require('./intentRouter');
 const { extractTextFromDocument } = require('./docParser');
 const { getPreferences, setPreference } = require('./preferences');
 const { runAutoSearch } = require('./autoApplier');
+const { getProfile, setProfileField, isProfileComplete, getMissingFields } = require('./profile');
+const { applyToJob } = require('./applicator');
 const supabase = require('../config/supabase');
 
 function parseIncomingMessage(req) {
@@ -267,13 +269,51 @@ async function handleIncomingMessage(req, res) {
         return;
       }
 
+      // Check profile is set up before attempting
+      const profile = await getProfile(from);
+      if (!isProfileComplete(profile)) {
+        const missing = getMissingFields(profile);
+        await sendMessage(from, `⚠️ Your profile is incomplete. Please set:\n${missing.map(f => `• ${f}`).join('\n')}\n\nExample: "my email is you@example.com"`);
+        return;
+      }
+
+      await sendMessage(from, `⏳ Applying to *${job.title}* at *${job.company}*...\n\nI'm tailoring your resume and filling out the form. This may take up to a minute.`);
+
+      // Run full apply pipeline (async — res already sent 200)
+      const result = await applyToJob(from, job);
+
+      // Update pending_jobs with outcome
       await supabase
         .from('pending_jobs')
-        .update({ status: 'applied', actioned_at: new Date().toISOString() })
+        .update({
+          status: result.success ? 'applied' : result.status,
+          actioned_at: new Date().toISOString(),
+        })
         .eq('id', numericId);
 
-      await addApplication(from, job.company, job.title, job.apply_link);
-      await sendMessage(from, `✅ Marked *${data.jobId}* as applied!\n\n🏢 ${job.company}\n💼 ${job.title}\n\nAdded to your tracker. Say "my applications" to see all.`);
+      if (result.success) {
+        // Add to application tracker
+        await addApplication(from, job.company, job.title, job.apply_link);
+        await sendMessage(
+          from,
+          `✅ *Application submitted!*\n\n🏢 ${job.company}\n💼 ${job.title}\n🤖 ATS: ${result.ats}\n\n${result.notes}\n\nAdded to your tracker. Say "my applications" to see all.`
+        );
+      } else if (result.status === 'manual_required') {
+        // Store in DB for reference, notify user
+        await supabase
+          .from('pending_jobs')
+          .update({ status: 'manual_required' })
+          .eq('id', numericId);
+        await sendMessage(
+          from,
+          `⚠️ *Manual application required*\n\n🏢 ${job.company}\n💼 ${job.title}\n\n${result.notes}`
+        );
+      } else {
+        await sendMessage(
+          from,
+          `❌ *Application failed*\n\n🏢 ${job.company}\n💼 ${job.title}\n\nReason: ${result.notes}`
+        );
+      }
       return;
     }
 
@@ -320,6 +360,70 @@ async function handleIncomingMessage(req, res) {
         .join('\n\n');
 
       await sendMessage(from, `📋 *Pending Jobs (${pending.length})*\n\n${list}\n\nReply *"apply JOB-XXX"* or *"skip JOB-XXX"*`);
+      return;
+    }
+
+    // --- SET PROFILE ---
+    if (intent === 'SET_PROFILE') {
+      if (!data.field || !data.value) {
+        await sendMessage(from, 'What info would you like to set? Example:\n"my name is Abdul Kareem"\n"my email is you@example.com"\n"my phone is +1-555-0000"');
+        return;
+      }
+
+      // Handle credentials separately — split "email:x|password:y"
+      if (data.field === 'linkedin_creds') {
+        const parts = Object.fromEntries(data.value.split('|').map(p => p.split(':')));
+        if (parts.email) await setProfileField(from, 'linkedin_email', parts.email.trim());
+        if (parts.password) await setProfileField(from, 'linkedin_pass', parts.password.trim());
+        await sendMessage(from, '✅ LinkedIn credentials saved.');
+        return;
+      }
+
+      if (data.field === 'indeed_creds') {
+        const parts = Object.fromEntries(data.value.split('|').map(p => p.split(':')));
+        if (parts.email) await setProfileField(from, 'indeed_email', parts.email.trim());
+        if (parts.password) await setProfileField(from, 'indeed_pass', parts.password.trim());
+        await sendMessage(from, '✅ Indeed credentials saved.');
+        return;
+      }
+
+      await setProfileField(from, data.field, data.value);
+      await sendMessage(from, `✅ Saved *${data.field.replace(/_/g, ' ')}*: ${data.value}`);
+
+      // Prompt for missing fields
+      const updated = await getProfile(from);
+      if (!isProfileComplete(updated)) {
+        const missing = getMissingFields(updated);
+        await sendMessage(from, `Still needed for auto-apply:\n${missing.map(f => `• ${f.replace(/_/g, ' ')}`).join('\n')}`);
+      } else {
+        await sendMessage(from, '🎉 Profile complete! Auto-apply is ready to go.');
+      }
+      return;
+    }
+
+    // --- VIEW PROFILE ---
+    if (intent === 'VIEW_PROFILE') {
+      const profile = await getProfile(from);
+      if (!profile) {
+        await sendMessage(from, '📋 No profile set yet.\n\nSay things like:\n"my name is Abdul Kareem"\n"my email is you@example.com"\n"my phone is +1-555-0000"\n"I\'m based in Austin TX"\n"I have OPT EAD work authorization"');
+        return;
+      }
+      const complete = isProfileComplete(profile);
+      const missing = getMissingFields(profile);
+      await sendMessage(
+        from,
+        `👤 *Your Profile*\n\n` +
+        `🙋 Name: ${profile.full_name || 'not set'}\n` +
+        `📧 Email: ${profile.email || 'not set'}\n` +
+        `📱 Phone: ${profile.phone || 'not set'}\n` +
+        `📍 Location: ${profile.location || 'not set'}\n` +
+        `🛂 Work auth: ${profile.work_auth || 'not set'}\n` +
+        `🔗 LinkedIn: ${profile.linkedin_url || 'not set'}\n` +
+        `🌐 Portfolio: ${profile.portfolio_url || 'not set'}\n` +
+        `🔑 LinkedIn login: ${profile.linkedin_email ? '✅ set' : 'not set'}\n` +
+        `🔑 Indeed login: ${profile.indeed_email ? '✅ set' : 'not set'}\n\n` +
+        (complete ? '✅ Profile complete — auto-apply is ready!' : `⚠️ Missing: ${missing.join(', ')}`)
+      );
       return;
     }
 
