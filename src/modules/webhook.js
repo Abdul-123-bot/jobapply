@@ -4,23 +4,21 @@ const twilio = require('twilio');
 const { TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_WHATSAPP_NUMBER } = require('../config/env');
 const { askClaude } = require('./claude');
 const { getHistory, addMessage, clearHistory } = require('./memory');
-const { saveResume, tailorResume } = require('./resume');
+const { saveResume, tailorResume, startResumeUpload, isUploadingResume, appendResumeChunk, finalizeResumeUpload, cancelResumeUpload } = require('./resume');
 const { generateCoverLetter } = require('./coverLetter');
 const { searchJobs, formatJobsForWhatsApp } = require('./jobSearch');
-const { addApplication, updateStatus, formatApplications, VALID_STATUSES } = require('./tracker'); // NEW
+const { addApplication, updateStatus, formatApplications, VALID_STATUSES } = require('./tracker');
+const { detectIntent } = require('./intentRouter');
+const { extractTextFromDocument } = require('./docParser');
 
 const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 
-// Update parseIncomingMessage to also capture media info
 function parseIncomingMessage(req) {
   const from = req.body.From;
   const body = req.body.Body || '';
-
-  // Twilio sends media as NumMedia + MediaUrl0 + MediaContentType0
   const numMedia = parseInt(req.body.NumMedia || '0');
   const mediaUrl = numMedia > 0 ? req.body.MediaUrl0 : null;
   const mediaType = numMedia > 0 ? req.body.MediaContentType0 : null;
-
   return { from, body, mediaUrl, mediaType };
 }
 
@@ -32,51 +30,6 @@ async function sendMessage(to, text) {
   });
 }
 
-function detectIntent(message) {
-  const msg = message.toLowerCase();
-
-  if (msg.includes('save my resume') || msg.includes('here is my resume') || msg.includes('my resume:')) {
-    return 'SAVE_RESUME';
-  }
-  if (msg.includes('tailor my resume') || msg.includes('tailor resume')) {
-    return 'TAILOR_RESUME';
-  }
-  if (msg.includes('cover letter')) {
-    return 'COVER_LETTER';
-  }
-  if (
-    msg.includes('find jobs') ||
-    msg.includes('find me jobs') ||
-    msg.includes('search jobs') ||
-    msg.includes('job listings') ||
-    msg.includes('looking for jobs') ||
-    msg.includes('jobs in') ||
-    msg.includes('jobs for') ||
-    msg.includes('developer jobs') ||
-    msg.includes('engineer jobs') ||
-    msg.includes('job openings')
-  ) {
-    return 'JOB_SEARCH';
-  }
-
-  // NEW intents for tracker
-  if (msg.startsWith('applied to ')) {
-    return 'ADD_APPLICATION';
-  }
-  if (msg.startsWith('update ') && VALID_STATUSES.some(s => msg.includes(s))) {
-    return 'UPDATE_STATUS';
-  }
-  if (msg.includes('my applications') || msg.includes('application status') || msg.includes('show applications')) {
-    return 'VIEW_APPLICATIONS';
-  }
-
-  if (msg.trim() === 'reset') {
-    return 'RESET';
-  }
-
-  return 'GENERAL';
-}
-
 async function handleIncomingMessage(req, res) {
   res.sendStatus(200);
 
@@ -84,10 +37,12 @@ async function handleIncomingMessage(req, res) {
   console.log(`📩 Message from ${from}: ${body}`);
 
   try {
+
+    // --- DOCUMENT UPLOAD ---
+    // Handle file attachments before intent detection
     if (mediaUrl && mediaType) {
       console.log(`📎 Document received: ${mediaType}`);
 
-      // Only handle PDF and Word docs
       const isSupportedDoc = (
         mediaType === 'application/pdf' ||
         mediaType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
@@ -100,150 +55,133 @@ async function handleIncomingMessage(req, res) {
       }
 
       await sendMessage(from, '📄 Document received! Extracting text...');
-
-      const { extractTextFromDocument } = require('./docParser');
       const resumeText = await extractTextFromDocument(mediaUrl, mediaType);
 
       if (!resumeText || resumeText.length < 50) {
-        await sendMessage(from, '❌ Could not extract text from your document. Make sure it\'s not a scanned image PDF. Try copying your resume text and sending it as a message instead.');
+        await sendMessage(from, '❌ Could not extract text from your document. Make sure it\'s not a scanned image PDF.');
         return;
       }
 
       await saveResume(from, resumeText);
-      await sendMessage(from, `✅ Resume saved from document! (${resumeText.length} characters extracted)\n\nYou can now:\n- "tailor my resume [paste job description]"\n- "cover letter [paste job description]"`);
+      await sendMessage(from, `✅ Resume saved! (${resumeText.length} characters)\n\nYou can now:\n- "Tailor my resume for this role: [paste JD]"\n- "Write me a cover letter for: [paste JD]"`);
       return;
     }
-    
-    const intent = detectIntent(body);
-    console.log(`🎯 Detected intent: ${intent}`);
+
+    // --- RESUME UPLOAD MODE ---
+    // If user is mid-upload, handle chunks before intent detection
+    if (isUploadingResume(from)) {
+      const { intent } = await detectIntent(body);
+
+      if (intent === 'FINISH_RESUME_UPLOAD') {
+        const fullResume = await finalizeResumeUpload(from);
+        await sendMessage(from, `✅ Resume saved! (${fullResume.length} characters)\n\nYou can now:\n- "Tailor my resume for this role: [paste JD]"\n- "Write me a cover letter for: [paste JD]"`);
+        return;
+      }
+
+      if (intent === 'CANCEL_RESUME_UPLOAD') {
+        cancelResumeUpload(from);
+        await sendMessage(from, '❌ Resume upload cancelled.');
+        return;
+      }
+
+      appendResumeChunk(from, body);
+      await sendMessage(from, '📝 Chunk received! Send more or say "done" when finished.');
+      return;
+    }
+
+    // --- SMART INTENT DETECTION ---
+    // Claude classifies the message and extracts data
+    const { intent, data } = await detectIntent(body);
 
     // --- RESET ---
     if (intent === 'RESET') {
-      clearHistory(from);
+      await clearHistory(from);
       await sendMessage(from, 'Conversation reset! How can I help you? 👋');
       return;
     }
 
-    // --- SAVE RESUME ---
-    if (intent === 'SAVE_RESUME') {
-      const resumeText = body
-        .replace(/save my resume/i, '')
-        .replace(/here is my resume/i, '')
-        .replace(/my resume:/i, '')
-        .trim();
-
-      if (resumeText.length < 50) {
-        await sendMessage(from, 'Please send your full resume text after the trigger phrase.');
-        return;
-      }
-
-      saveResume(from, resumeText);
-      await sendMessage(from, '✅ Resume saved!');
+    // --- START RESUME UPLOAD ---
+    if (intent === 'START_RESUME_UPLOAD') {
+      startResumeUpload(from);
+      await sendMessage(from, '📋 Resume upload started!\n\nSend your resume in as many messages as you need.\nSay *"done"* when finished.\nSay *"cancel"* to abort.\n\nOr just send a PDF or Word file directly!');
       return;
     }
 
     // --- TAILOR RESUME ---
     if (intent === 'TAILOR_RESUME') {
+      if (!data.jobDescription) {
+        await sendMessage(from, 'Please include the job description. Example:\n"Tailor my resume for this role: [paste JD here]"');
+        return;
+      }
       await sendMessage(from, '⏳ Tailoring your resume...');
-      const jobDescription = body.replace(/tailor my resume/i, '').replace(/tailor resume/i, '').trim();
-      const tailored = await tailorResume(from, jobDescription);
+      const tailored = await tailorResume(from, data.jobDescription);
       await sendMessage(from, `✅ Tailored resume:\n\n${tailored}`);
       return;
     }
 
     // --- COVER LETTER ---
     if (intent === 'COVER_LETTER') {
+      if (!data.jobDescription) {
+        await sendMessage(from, 'Please include the job description. Example:\n"Write a cover letter for: [paste JD here]"');
+        return;
+      }
       await sendMessage(from, '⏳ Writing your cover letter...');
-      const jobDescription = body.replace(/write me a cover letter/i, '').replace(/cover letter/i, '').trim();
-      const letter = await generateCoverLetter(from, jobDescription);
+      const letter = await generateCoverLetter(from, data.jobDescription);
       await sendMessage(from, `✅ Cover letter:\n\n${letter}`);
       return;
     }
 
     // --- JOB SEARCH ---
     if (intent === 'JOB_SEARCH') {
-      await sendMessage(from, '🔍 Searching for jobs...');
-      const query = body
-        .replace(/find me jobs/i, '')
-        .replace(/find jobs/i, '')
-        .replace(/search jobs/i, '')
-        .replace(/job listings/i, '')
-        .replace(/looking for jobs/i, '')
-        .replace(/job openings/i, '')
-        .trim();
-      const jobs = await searchJobs(query);
+      if (!data.query) {
+        await sendMessage(from, 'What kind of jobs are you looking for? Example:\n"Find me React developer jobs in Austin TX"');
+        return;
+      }
+      await sendMessage(from, `🔍 Searching for *${data.query}*...`);
+      const jobs = await searchJobs(data.query);
       const formatted = formatJobsForWhatsApp(jobs);
-      await sendMessage(from, `✅ Top jobs for *${query}*:\n\n${formatted}`);
+      await sendMessage(from, `✅ Top jobs for *${data.query}*:\n\n${formatted}`);
       return;
     }
 
-    // --- ADD APPLICATION --- NEW
-    // Format: "applied to [Company] [Role] [Link(optional)]"
-    // Example: "applied to Google Senior React Engineer careers.google.com"
+    // --- ADD APPLICATION ---
     if (intent === 'ADD_APPLICATION') {
-      // Remove the trigger phrase
-      const parts = body.replace(/applied to /i, '').trim().split(' ');
-
-      // First word is company, last word is link if it looks like a URL
-      // everything in between is the role
-      const hasLink = parts[parts.length - 1].includes('.');
-      const company = parts[0];
-      const link = hasLink ? parts[parts.length - 1] : '';
-      const roleWords = hasLink ? parts.slice(1, -1) : parts.slice(1);
-      const role = roleWords.join(' ') || 'Not specified';
-
-      const app = addApplication(from, company, role, link);
-      await sendMessage(
-        from,
-        `✅ Application saved!\n\n🏢 *${app.company}*\n💼 ${app.role}\n📊 Status: ${app.status}\n📅 Date: ${app.date}\n\nSay "my applications" to see all your tracked jobs.`
-      );
+      if (!data.company) {
+        await sendMessage(from, 'Please mention the company name. Example:\n"I applied to Google for a React Engineer role"');
+        return;
+      }
+      const app = await addApplication(from, data.company, data.role || 'Not specified', data.link || '');
+      await sendMessage(from, `✅ Application saved!\n\n🏢 *${app.company}*\n💼 ${app.role}\n📊 Status: ${app.status}\n📅 Date: ${app.date}\n\nSay "my applications" to see all tracked jobs.`);
       return;
     }
 
-    // --- UPDATE STATUS --- NEW
-    // Format: "update [Company] to [status]"
-    // Example: "update Google to interviewing"
+    // --- UPDATE STATUS ---
     if (intent === 'UPDATE_STATUS') {
-      const msg = body.toLowerCase();
-
-      // Extract company — between "update " and " to"
-      const companyMatch = body.match(/update (.+?) to/i);
-      if (!companyMatch) {
-        await sendMessage(from, 'Please use this format:\n"update [Company] to [status]"\n\nValid statuses: Applied, Interviewing, Offer, Rejected, Withdrawn');
+      if (!data.company || !data.status) {
+        await sendMessage(from, 'Please mention the company and new status.\nExample: "Google rejected me" or "I got an offer from Meta"');
         return;
       }
-
-      const company = companyMatch[1].trim();
-      const newStatus = VALID_STATUSES.find(s => msg.includes(s));
-
-      if (!newStatus) {
-        await sendMessage(from, `Valid statuses are:\n${VALID_STATUSES.join(', ')}`);
-        return;
-      }
-
-      const updated = updateStatus(from, company, newStatus);
-
+      const updated = await updateStatus(from, data.company, data.status);
       if (!updated) {
-        await sendMessage(from, `Couldn't find an application for *${company}*. Check your applications with "my applications".`);
+        await sendMessage(from, `Couldn't find an application for *${data.company}*. Check your applications with "my applications".`);
         return;
       }
-
-      await sendMessage(from, `✅ Updated *${updated.company}* status to *${updated.status}*!`);
+      await sendMessage(from, `✅ Updated *${updated.company}* to *${updated.status}*!`);
       return;
     }
 
-    // --- VIEW APPLICATIONS --- NEW
+    // --- VIEW APPLICATIONS ---
     if (intent === 'VIEW_APPLICATIONS') {
-      const summary = formatApplications(from);
+      const summary = await formatApplications(from);
       await sendMessage(from, summary);
       return;
     }
 
     // --- GENERAL CONVERSATION ---
-    addMessage(from, 'user', body);
-    const history = getHistory(from);
+    await addMessage(from, 'user', body);
+    const history = await getHistory(from);
     const reply = await askClaude(history);
-    addMessage(from, 'assistant', reply);
+    await addMessage(from, 'assistant', reply);
     await sendMessage(from, reply);
 
   } catch (error) {
