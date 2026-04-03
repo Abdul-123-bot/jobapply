@@ -11,10 +11,17 @@ const { addApplication, updateStatus, formatApplications, VALID_STATUSES } = req
 
 const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 
+// Update parseIncomingMessage to also capture media info
 function parseIncomingMessage(req) {
   const from = req.body.From;
-  const body = req.body.Body;
-  return { from, body };
+  const body = req.body.Body || '';
+
+  // Twilio sends media as NumMedia + MediaUrl0 + MediaContentType0
+  const numMedia = parseInt(req.body.NumMedia || '0');
+  const mediaUrl = numMedia > 0 ? req.body.MediaUrl0 : null;
+  const mediaType = numMedia > 0 ? req.body.MediaContentType0 : null;
+
+  return { from, body, mediaUrl, mediaType };
 }
 
 async function sendMessage(to, text) {
@@ -73,10 +80,40 @@ function detectIntent(message) {
 async function handleIncomingMessage(req, res) {
   res.sendStatus(200);
 
-  const { from, body } = parseIncomingMessage(req);
+  const { from, body, mediaUrl, mediaType } = parseIncomingMessage(req);
   console.log(`📩 Message from ${from}: ${body}`);
 
   try {
+    if (mediaUrl && mediaType) {
+      console.log(`📎 Document received: ${mediaType}`);
+
+      // Only handle PDF and Word docs
+      const isSupportedDoc = (
+        mediaType === 'application/pdf' ||
+        mediaType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
+        mediaType === 'application/msword'
+      );
+
+      if (!isSupportedDoc) {
+        await sendMessage(from, '❌ Unsupported file type. Please send your resume as a PDF or Word (.docx) file.');
+        return;
+      }
+
+      await sendMessage(from, '📄 Document received! Extracting text...');
+
+      const { extractTextFromDocument } = require('./docParser');
+      const resumeText = await extractTextFromDocument(mediaUrl, mediaType);
+
+      if (!resumeText || resumeText.length < 50) {
+        await sendMessage(from, '❌ Could not extract text from your document. Make sure it\'s not a scanned image PDF. Try copying your resume text and sending it as a message instead.');
+        return;
+      }
+
+      await saveResume(from, resumeText);
+      await sendMessage(from, `✅ Resume saved from document! (${resumeText.length} characters extracted)\n\nYou can now:\n- "tailor my resume [paste job description]"\n- "cover letter [paste job description]"`);
+      return;
+    }
+    
     const intent = detectIntent(body);
     console.log(`🎯 Detected intent: ${intent}`);
 
