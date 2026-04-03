@@ -6,7 +6,8 @@ const { askClaude } = require('./claude');
 const { getHistory, addMessage, clearHistory } = require('./memory');
 const { saveResume, tailorResume } = require('./resume');
 const { generateCoverLetter } = require('./coverLetter');
-const { searchJobs, formatJobsForWhatsApp } = require('./jobSearch'); // NEW
+const { searchJobs, formatJobsForWhatsApp } = require('./jobSearch');
+const { addApplication, updateStatus, formatApplications, VALID_STATUSES } = require('./tracker'); // NEW
 
 const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 
@@ -36,8 +37,6 @@ function detectIntent(message) {
   if (msg.includes('cover letter')) {
     return 'COVER_LETTER';
   }
-
-  // Broader job search detection
   if (
     msg.includes('find jobs') ||
     msg.includes('find me jobs') ||
@@ -51,6 +50,17 @@ function detectIntent(message) {
     msg.includes('job openings')
   ) {
     return 'JOB_SEARCH';
+  }
+
+  // NEW intents for tracker
+  if (msg.startsWith('applied to ')) {
+    return 'ADD_APPLICATION';
+  }
+  if (msg.startsWith('update ') && VALID_STATUSES.some(s => msg.includes(s))) {
+    return 'UPDATE_STATUS';
+  }
+  if (msg.includes('my applications') || msg.includes('application status') || msg.includes('show applications')) {
+    return 'VIEW_APPLICATIONS';
   }
 
   if (msg.trim() === 'reset') {
@@ -86,77 +96,111 @@ async function handleIncomingMessage(req, res) {
         .trim();
 
       if (resumeText.length < 50) {
-        await sendMessage(from, 'Please send your full resume text after the trigger phrase. Example:\n\n"save my resume\n[paste your resume here]"');
+        await sendMessage(from, 'Please send your full resume text after the trigger phrase.');
         return;
       }
 
       saveResume(from, resumeText);
-      await sendMessage(from, '✅ Resume saved! You can now ask me to:\n- "Tailor my resume for [paste job description]"\n- "Write a cover letter for [paste job description]"\n- "Find jobs React developer Austin TX"');
+      await sendMessage(from, '✅ Resume saved!');
       return;
     }
 
     // --- TAILOR RESUME ---
     if (intent === 'TAILOR_RESUME') {
-      await sendMessage(from, '⏳ Tailoring your resume, give me a moment...');
-
-      const jobDescription = body
-        .replace(/tailor my resume/i, '')
-        .replace(/tailor resume/i, '')
-        .trim();
-
-      if (jobDescription.length < 20) {
-        await sendMessage(from, 'Please paste the job description after "tailor my resume".');
-        return;
-      }
-
+      await sendMessage(from, '⏳ Tailoring your resume...');
+      const jobDescription = body.replace(/tailor my resume/i, '').replace(/tailor resume/i, '').trim();
       const tailored = await tailorResume(from, jobDescription);
-      await sendMessage(from, `✅ Here is your tailored resume:\n\n${tailored}`);
+      await sendMessage(from, `✅ Tailored resume:\n\n${tailored}`);
       return;
     }
 
     // --- COVER LETTER ---
     if (intent === 'COVER_LETTER') {
-      await sendMessage(from, '⏳ Writing your cover letter, give me a moment...');
-
-      const jobDescription = body
-        .replace(/write me a cover letter/i, '')
-        .replace(/cover letter/i, '')
-        .trim();
-
-      if (jobDescription.length < 20) {
-        await sendMessage(from, 'Please paste the job description after "cover letter".');
-        return;
-      }
-
+      await sendMessage(from, '⏳ Writing your cover letter...');
+      const jobDescription = body.replace(/write me a cover letter/i, '').replace(/cover letter/i, '').trim();
       const letter = await generateCoverLetter(from, jobDescription);
-      await sendMessage(from, `✅ Here is your cover letter:\n\n${letter}`);
+      await sendMessage(from, `✅ Cover letter:\n\n${letter}`);
       return;
     }
 
-    // --- JOB SEARCH --- NEW
     // --- JOB SEARCH ---
-if (intent === 'JOB_SEARCH') {
-  await sendMessage(from, '🔍 Searching for jobs, give me a moment...');
+    if (intent === 'JOB_SEARCH') {
+      await sendMessage(from, '🔍 Searching for jobs...');
+      const query = body
+        .replace(/find me jobs/i, '')
+        .replace(/find jobs/i, '')
+        .replace(/search jobs/i, '')
+        .replace(/job listings/i, '')
+        .replace(/looking for jobs/i, '')
+        .replace(/job openings/i, '')
+        .trim();
+      const jobs = await searchJobs(query);
+      const formatted = formatJobsForWhatsApp(jobs);
+      await sendMessage(from, `✅ Top jobs for *${query}*:\n\n${formatted}`);
+      return;
+    }
 
-  const query = body
-    .replace(/find me jobs/i, '')
-    .replace(/find jobs/i, '')
-    .replace(/search jobs/i, '')
-    .replace(/job listings/i, '')
-    .replace(/looking for jobs/i, '')
-    .replace(/job openings/i, '')
-    .trim();
+    // --- ADD APPLICATION --- NEW
+    // Format: "applied to [Company] [Role] [Link(optional)]"
+    // Example: "applied to Google Senior React Engineer careers.google.com"
+    if (intent === 'ADD_APPLICATION') {
+      // Remove the trigger phrase
+      const parts = body.replace(/applied to /i, '').trim().split(' ');
 
-  if (query.length < 2) {
-    await sendMessage(from, 'Please tell me what jobs to search for. Example:\n\n"find jobs React developer Austin TX"');
-    return;
-  }
+      // First word is company, last word is link if it looks like a URL
+      // everything in between is the role
+      const hasLink = parts[parts.length - 1].includes('.');
+      const company = parts[0];
+      const link = hasLink ? parts[parts.length - 1] : '';
+      const roleWords = hasLink ? parts.slice(1, -1) : parts.slice(1);
+      const role = roleWords.join(' ') || 'Not specified';
 
-  const jobs = await searchJobs(query);
-  const formatted = formatJobsForWhatsApp(jobs);
-  await sendMessage(from, `✅ Here are the top jobs for *${query}*:\n\n${formatted}`);
-  return;
-}
+      const app = addApplication(from, company, role, link);
+      await sendMessage(
+        from,
+        `✅ Application saved!\n\n🏢 *${app.company}*\n💼 ${app.role}\n📊 Status: ${app.status}\n📅 Date: ${app.date}\n\nSay "my applications" to see all your tracked jobs.`
+      );
+      return;
+    }
+
+    // --- UPDATE STATUS --- NEW
+    // Format: "update [Company] to [status]"
+    // Example: "update Google to interviewing"
+    if (intent === 'UPDATE_STATUS') {
+      const msg = body.toLowerCase();
+
+      // Extract company — between "update " and " to"
+      const companyMatch = body.match(/update (.+?) to/i);
+      if (!companyMatch) {
+        await sendMessage(from, 'Please use this format:\n"update [Company] to [status]"\n\nValid statuses: Applied, Interviewing, Offer, Rejected, Withdrawn');
+        return;
+      }
+
+      const company = companyMatch[1].trim();
+      const newStatus = VALID_STATUSES.find(s => msg.includes(s));
+
+      if (!newStatus) {
+        await sendMessage(from, `Valid statuses are:\n${VALID_STATUSES.join(', ')}`);
+        return;
+      }
+
+      const updated = updateStatus(from, company, newStatus);
+
+      if (!updated) {
+        await sendMessage(from, `Couldn't find an application for *${company}*. Check your applications with "my applications".`);
+        return;
+      }
+
+      await sendMessage(from, `✅ Updated *${updated.company}* status to *${updated.status}*!`);
+      return;
+    }
+
+    // --- VIEW APPLICATIONS --- NEW
+    if (intent === 'VIEW_APPLICATIONS') {
+      const summary = formatApplications(from);
+      await sendMessage(from, summary);
+      return;
+    }
 
     // --- GENERAL CONVERSATION ---
     addMessage(from, 'user', body);
