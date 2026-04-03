@@ -1,63 +1,61 @@
 // src/modules/memory.js
 
-// This module manages conversation history per user.
-// Each user (identified by their WhatsApp number) gets their own
-// conversation history stored in memory.
-//
-// NOTE: This is in-memory storage for now, meaning history resets
-// if the server restarts. In a future step we'll persist this to
-// Supabase so history survives restarts.
+// Conversation history is now persisted in Supabase.
+// Each user has one row in the conversations table,
+// with their full messages array stored as JSONB.
 
-// A simple object that maps phone numbers to their message history.
-// Example:
-// {
-//   "whatsapp:+923001234567": [
-//     { role: "user", content: "hi" },
-//     { role: "assistant", content: "Hello! How can I help?" }
-//   ]
-// }
-const conversations = {};
+const supabase = require('../config/supabase');
 
 /**
- * Returns the conversation history for a user.
- * Creates an empty history if this is their first message.
- *
- * @param {string} userId - the user's WhatsApp number
- * @returns {Array} - array of {role, content} message objects
+ * Retrieves conversation history for a user from Supabase.
+ * Returns empty array if no history exists yet.
  */
-function getHistory(userId) {
-  if (!conversations[userId]) {
-    conversations[userId] = [];
-  }
-  return conversations[userId];
+async function getHistory(userId) {
+  const { data, error } = await supabase
+    .from('conversations')
+    .select('messages')
+    .eq('user_id', userId)
+    .single();
+
+  if (error || !data) return [];
+  return data.messages || [];
 }
 
 /**
- * Adds a new message to a user's conversation history.
- *
- * @param {string} userId  - the user's WhatsApp number
- * @param {string} role    - either "user" or "assistant"
- * @param {string} content - the message text
+ * Adds a message to a user's conversation history in Supabase.
+ * Uses upsert so it creates a new row or updates the existing one.
  */
-function addMessage(userId, role, content) {
-  const history = getHistory(userId);
+async function addMessage(userId, role, content) {
+  // First get existing history
+  const history = await getHistory(userId);
+
+  // Add the new message
   history.push({ role, content });
 
-  // Keep only the last 20 messages to avoid hitting Claude's token limit.
-  // This is a simple sliding window — old context drops off naturally.
-  if (history.length > 20) {
-    conversations[userId] = history.slice(-20);
-  }
+  // Keep last 20 messages only
+  const trimmed = history.slice(-20);
+
+  // Upsert — insert if not exists, update if exists
+  await supabase
+    .from('conversations')
+    .upsert({
+      user_id: userId,
+      messages: trimmed,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: 'user_id' });
 }
 
 /**
- * Clears a user's conversation history.
- * Useful if the user says "start over" or "reset".
- *
- * @param {string} userId - the user's WhatsApp number
+ * Clears conversation history for a user.
  */
-function clearHistory(userId) {
-  conversations[userId] = [];
+async function clearHistory(userId) {
+  await supabase
+    .from('conversations')
+    .upsert({
+      user_id: userId,
+      messages: [],
+      updated_at: new Date().toISOString(),
+    }, { onConflict: 'user_id' });
 }
 
 module.exports = { getHistory, addMessage, clearHistory };
