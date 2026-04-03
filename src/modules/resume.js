@@ -8,13 +8,23 @@ const supabase = require('../config/supabase');
  * Uses upsert so it creates or updates in one operation.
  */
 async function saveResume(userId, text) {
-  await supabase
+  console.log('💾 Saving resume for:', userId);
+
+  const { data, error } = await supabase
     .from('resumes')
     .upsert({
       user_id: userId,
       resume_text: text.trim(),
       updated_at: new Date().toISOString(),
-    }, { onConflict: 'user_id' });
+    }, { onConflict: 'user_id' })
+    .select(); // add .select() so Supabase returns the saved row
+
+  if (error) {
+    console.error('❌ Supabase error saving resume:', error.message);
+    throw new Error(error.message);
+  }
+
+  console.log('✅ Resume saved to Supabase:', data);
 }
 
 /**
