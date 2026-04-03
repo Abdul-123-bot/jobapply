@@ -5,7 +5,8 @@ const { TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_WHATSAPP_NUMBER } = requir
 const { askClaude } = require('./claude');
 const { getHistory, addMessage, clearHistory } = require('./memory');
 const { saveResume, tailorResume } = require('./resume');
-const { generateCoverLetter } = require('./coverLetter'); // NEW
+const { generateCoverLetter } = require('./coverLetter');
+const { searchJobs, formatJobsForWhatsApp } = require('./jobSearch'); // NEW
 
 const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 
@@ -32,10 +33,24 @@ function detectIntent(message) {
   if (msg.includes('tailor my resume') || msg.includes('tailor resume')) {
     return 'TAILOR_RESUME';
   }
-
-  // NEW — detect cover letter requests
-  if (msg.includes('cover letter') || msg.includes('write me a cover letter')) {
+  if (msg.includes('cover letter')) {
     return 'COVER_LETTER';
+  }
+
+  // Broader job search detection
+  if (
+    msg.includes('find jobs') ||
+    msg.includes('find me jobs') ||
+    msg.includes('search jobs') ||
+    msg.includes('job listings') ||
+    msg.includes('looking for jobs') ||
+    msg.includes('jobs in') ||
+    msg.includes('jobs for') ||
+    msg.includes('developer jobs') ||
+    msg.includes('engineer jobs') ||
+    msg.includes('job openings')
+  ) {
+    return 'JOB_SEARCH';
   }
 
   if (msg.trim() === 'reset') {
@@ -76,7 +91,7 @@ async function handleIncomingMessage(req, res) {
       }
 
       saveResume(from, resumeText);
-      await sendMessage(from, '✅ Resume saved! You can now ask me to:\n- "Tailor my resume for [paste job description]"\n- "Write a cover letter for [paste job description]"');
+      await sendMessage(from, '✅ Resume saved! You can now ask me to:\n- "Tailor my resume for [paste job description]"\n- "Write a cover letter for [paste job description]"\n- "Find jobs React developer Austin TX"');
       return;
     }
 
@@ -99,18 +114,17 @@ async function handleIncomingMessage(req, res) {
       return;
     }
 
-    // --- COVER LETTER --- NEW
+    // --- COVER LETTER ---
     if (intent === 'COVER_LETTER') {
       await sendMessage(from, '⏳ Writing your cover letter, give me a moment...');
 
-      // Extract job description — everything after the trigger phrase
       const jobDescription = body
         .replace(/write me a cover letter/i, '')
         .replace(/cover letter/i, '')
         .trim();
 
       if (jobDescription.length < 20) {
-        await sendMessage(from, 'Please paste the job description after "cover letter". Example:\n\n"cover letter\n[paste job description here]"');
+        await sendMessage(from, 'Please paste the job description after "cover letter".');
         return;
       }
 
@@ -118,6 +132,31 @@ async function handleIncomingMessage(req, res) {
       await sendMessage(from, `✅ Here is your cover letter:\n\n${letter}`);
       return;
     }
+
+    // --- JOB SEARCH --- NEW
+    // --- JOB SEARCH ---
+if (intent === 'JOB_SEARCH') {
+  await sendMessage(from, '🔍 Searching for jobs, give me a moment...');
+
+  const query = body
+    .replace(/find me jobs/i, '')
+    .replace(/find jobs/i, '')
+    .replace(/search jobs/i, '')
+    .replace(/job listings/i, '')
+    .replace(/looking for jobs/i, '')
+    .replace(/job openings/i, '')
+    .trim();
+
+  if (query.length < 2) {
+    await sendMessage(from, 'Please tell me what jobs to search for. Example:\n\n"find jobs React developer Austin TX"');
+    return;
+  }
+
+  const jobs = await searchJobs(query);
+  const formatted = formatJobsForWhatsApp(jobs);
+  await sendMessage(from, `✅ Here are the top jobs for *${query}*:\n\n${formatted}`);
+  return;
+}
 
     // --- GENERAL CONVERSATION ---
     addMessage(from, 'user', body);
