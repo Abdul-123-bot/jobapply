@@ -3,9 +3,52 @@
 const { askClaude } = require('./claude');
 const supabase = require('../config/supabase');
 
+// Tracks users currently in resume upload mode
+// Key: userId, Value: array of text chunks received so far
+const pendingUploads = {};
+
+/**
+ * Starts resume upload mode for a user.
+ */
+function startResumeUpload(userId) {
+  pendingUploads[userId] = [];
+}
+
+/**
+ * Returns true if user is currently in resume upload mode.
+ */
+function isUploadingResume(userId) {
+  return !!pendingUploads[userId];
+}
+
+/**
+ * Appends a chunk of text to the pending resume.
+ */
+function appendResumeChunk(userId, text) {
+  if (pendingUploads[userId]) {
+    pendingUploads[userId].push(text);
+  }
+}
+
+/**
+ * Finalizes the resume upload — joins all chunks and saves to Supabase.
+ */
+async function finalizeResumeUpload(userId) {
+  const fullResume = pendingUploads[userId].join('\n');
+  delete pendingUploads[userId];
+  await saveResume(userId, fullResume);
+  return fullResume;
+}
+
+/**
+ * Cancels an in-progress resume upload.
+ */
+function cancelResumeUpload(userId) {
+  delete pendingUploads[userId];
+}
+
 /**
  * Saves a user's resume to Supabase.
- * Uses upsert so it creates or updates in one operation.
  */
 async function saveResume(userId, text) {
   console.log('💾 Saving resume for:', userId);
@@ -17,7 +60,7 @@ async function saveResume(userId, text) {
       resume_text: text.trim(),
       updated_at: new Date().toISOString(),
     }, { onConflict: 'user_id' })
-    .select(); // add .select() so Supabase returns the saved row
+    .select();
 
   if (error) {
     console.error('❌ Supabase error saving resume:', error.message);
@@ -29,7 +72,6 @@ async function saveResume(userId, text) {
 
 /**
  * Retrieves a user's resume from Supabase.
- * Returns null if no resume saved yet.
  */
 async function getResume(userId) {
   const { data, error } = await supabase
@@ -49,7 +91,7 @@ async function tailorResume(userId, jobDescription) {
   const resume = await getResume(userId);
 
   if (!resume) {
-    return "You haven't saved your resume yet! Send your resume text and say \"save my resume\" first.";
+    return "You haven't saved your resume yet! Send your resume as a PDF or Word file, or say \"upload resume\" to paste it manually.";
   }
 
   const messages = [
@@ -79,4 +121,13 @@ Return only the tailored resume text, nothing else.
   return await askClaude(messages);
 }
 
-module.exports = { saveResume, getResume, tailorResume };
+module.exports = {
+  saveResume,
+  getResume,
+  tailorResume,
+  startResumeUpload,
+  isUploadingResume,
+  appendResumeChunk,
+  finalizeResumeUpload,
+  cancelResumeUpload,
+};
