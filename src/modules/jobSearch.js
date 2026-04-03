@@ -17,6 +17,16 @@ const { RAPIDAPI_KEY } = require('../config/env');
  * @param {number} numJobs  - how many jobs to return (default 3)
  * @returns {Array}         - array of job objects
  */
+function formatSalary(job) {
+  if (!job.job_min_salary && !job.job_max_salary) return null;
+  const currency = job.job_salary_currency || 'USD';
+  const period = job.job_salary_period ? `/${job.job_salary_period.toLowerCase()}` : '/yr';
+  const min = job.job_min_salary ? `$${Math.round(job.job_min_salary / 1000)}k` : null;
+  const max = job.job_max_salary ? `$${Math.round(job.job_max_salary / 1000)}k` : null;
+  if (min && max) return `${min} - ${max} ${currency}${period}`;
+  return `${min || max} ${currency}${period}`;
+}
+
 async function searchJobs(query, numJobs = 3) {
   const url = `https://jsearch.p.rapidapi.com/search?query=${encodeURIComponent(query)}&num_pages=1&page=1`;
 
@@ -49,9 +59,9 @@ async function searchJobs(query, numJobs = 3) {
       ? new Date(job.job_posted_at_datetime_utc).toDateString()
       : 'Unknown',
     applyLink: job.job_apply_link,
-    description: job.job_description
-      ? job.job_description.slice(0, 300) + '...' // truncate for WhatsApp
-      : 'No description available',
+    salary: formatSalary(job),
+    description: job.job_description || 'No description available',
+    requirements: (job.job_highlights?.Qualifications || []).slice(0, 5).join('\n'),
   }));
 }
 
@@ -72,7 +82,7 @@ function formatJobsForWhatsApp(jobs) {
 *${job.index}. ${job.title}*
 🏢 ${job.company}
 📍 ${job.location} | ${job.remote}
-💼 ${job.type}
+💼 ${job.type}${job.salary ? `\n💰 ${job.salary}` : ''}
 📅 Posted: ${job.posted}
 🔗 Apply: ${job.applyLink}
       `.trim()

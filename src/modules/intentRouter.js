@@ -63,7 +63,47 @@ Available intents and their data fields:
     - User wants to reset or clear the conversation
     - data: {}
 
-11. GENERAL
+11. SET_JOB_TITLE
+    - User wants to set or update their preferred job title for auto search
+    - data: { "jobTitle": "the job title they specified" }
+
+12. SET_LOCATION
+    - User wants to set or update their preferred job search location
+    - data: { "location": "the location they specified" }
+
+13. SET_KEYWORDS
+    - User wants to set additional search keywords (e.g. "remote", "startup", "React")
+    - data: { "keywords": "the keywords they specified" }
+
+14. START_AUTO_SEARCH
+    - User wants to enable the automatic hourly job search
+    - data: {}
+
+15. STOP_AUTO_SEARCH
+    - User wants to disable the automatic hourly job search
+    - data: {}
+
+16. VIEW_PREFERENCES
+    - User wants to see their current auto search preferences
+    - data: {}
+
+17. SEARCH_NOW
+    - User wants to trigger an immediate job search using their saved preferences
+    - data: {}
+
+18. APPLY_JOB
+    - User wants to mark a job card as applied (e.g. "apply JOB-007", "I'll apply to JOB-012")
+    - data: { "jobId": "JOB-007" }
+
+19. SKIP_JOB
+    - User wants to dismiss/skip a job card (e.g. "skip JOB-003", "not interested in JOB-003")
+    - data: { "jobId": "JOB-003" }
+
+20. VIEW_PENDING
+    - User wants to see their list of pending job cards awaiting a decision
+    - data: {}
+
+21. GENERAL
     - Message doesn't match any of the above
     - data: {}
 
@@ -85,6 +125,24 @@ Response: {"intent":"JOB_SEARCH","data":{"query":"Node.js developer Bangalore"}}
 
 User: "Google rejected me :("
 Response: {"intent":"UPDATE_STATUS","data":{"company":"Google","status":"rejected"}}
+
+User: "set my job title to Senior React Developer"
+Response: {"intent":"SET_JOB_TITLE","data":{"jobTitle":"Senior React Developer"}}
+
+User: "I'm looking in Austin Texas"
+Response: {"intent":"SET_LOCATION","data":{"location":"Austin, TX"}}
+
+User: "start auto search"
+Response: {"intent":"START_AUTO_SEARCH","data":{}}
+
+User: "apply JOB-007"
+Response: {"intent":"APPLY_JOB","data":{"jobId":"JOB-007"}}
+
+User: "skip JOB-003"
+Response: {"intent":"SKIP_JOB","data":{"jobId":"JOB-003"}}
+
+User: "show my pending jobs"
+Response: {"intent":"VIEW_PENDING","data":{}}
 
 Return ONLY the JSON object. No explanation. No markdown. No backticks.
 `;

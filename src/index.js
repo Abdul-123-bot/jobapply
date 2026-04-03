@@ -3,8 +3,8 @@
 const { PORT } = require('./config/env');
 const express = require('express');
 
-// Import the real webhook handler
 const { handleIncomingMessage } = require('./modules/webhook');
+const { startCronJob } = require('./modules/autoApplier');
 
 const app = express();
 
@@ -20,4 +20,5 @@ app.post('/webhook', handleIncomingMessage);
 
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
+  startCronJob();
 });

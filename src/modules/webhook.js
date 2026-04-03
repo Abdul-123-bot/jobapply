@@ -1,17 +1,17 @@
 // src/modules/webhook.js
 
-const twilio = require('twilio');
-const { TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_WHATSAPP_NUMBER } = require('../config/env');
+const { sendMessage } = require('./messenger');
 const { askClaude } = require('./claude');
 const { getHistory, addMessage, clearHistory } = require('./memory');
 const { saveResume, tailorResume, startResumeUpload, isUploadingResume, appendResumeChunk, finalizeResumeUpload, cancelResumeUpload } = require('./resume');
 const { generateCoverLetter } = require('./coverLetter');
 const { searchJobs, formatJobsForWhatsApp } = require('./jobSearch');
-const { addApplication, updateStatus, formatApplications, VALID_STATUSES } = require('./tracker');
+const { addApplication, updateStatus, formatApplications } = require('./tracker');
 const { detectIntent } = require('./intentRouter');
 const { extractTextFromDocument } = require('./docParser');
-
-const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
+const { getPreferences, setPreference } = require('./preferences');
+const { runAutoSearch } = require('./autoApplier');
+const supabase = require('../config/supabase');
 
 function parseIncomingMessage(req) {
   const from = req.body.From;
@@ -20,14 +20,6 @@ function parseIncomingMessage(req) {
   const mediaUrl = numMedia > 0 ? req.body.MediaUrl0 : null;
   const mediaType = numMedia > 0 ? req.body.MediaContentType0 : null;
   return { from, body, mediaUrl, mediaType };
-}
-
-async function sendMessage(to, text) {
-  await client.messages.create({
-    from: TWILIO_WHATSAPP_NUMBER,
-    to,
-    body: text,
-  });
 }
 
 async function handleIncomingMessage(req, res) {
@@ -39,7 +31,6 @@ async function handleIncomingMessage(req, res) {
   try {
 
     // --- DOCUMENT UPLOAD ---
-    // Handle file attachments before intent detection
     if (mediaUrl && mediaType) {
       console.log(`📎 Document received: ${mediaType}`);
 
@@ -68,7 +59,6 @@ async function handleIncomingMessage(req, res) {
     }
 
     // --- RESUME UPLOAD MODE ---
-    // If user is mid-upload, handle chunks before intent detection
     if (isUploadingResume(from)) {
       const { intent } = await detectIntent(body);
 
@@ -90,7 +80,6 @@ async function handleIncomingMessage(req, res) {
     }
 
     // --- SMART INTENT DETECTION ---
-    // Claude classifies the message and extracts data
     const { intent, data } = await detectIntent(body);
 
     // --- RESET ---
@@ -177,6 +166,163 @@ async function handleIncomingMessage(req, res) {
       return;
     }
 
+    // --- SET JOB TITLE ---
+    if (intent === 'SET_JOB_TITLE') {
+      if (!data.jobTitle) {
+        await sendMessage(from, 'What job title should I search for? Example:\n"set my job title to Senior React Developer"');
+        return;
+      }
+      await setPreference(from, 'job_title', data.jobTitle);
+      await sendMessage(from, `✅ Job title set to: *${data.jobTitle}*\n\nAlso set your location:\n"I'm looking in Austin TX"`);
+      return;
+    }
+
+    // --- SET LOCATION ---
+    if (intent === 'SET_LOCATION') {
+      if (!data.location) {
+        await sendMessage(from, 'What location should I search in?');
+        return;
+      }
+      await setPreference(from, 'location', data.location);
+      await sendMessage(from, `✅ Location set to: *${data.location}*`);
+      return;
+    }
+
+    // --- SET KEYWORDS ---
+    if (intent === 'SET_KEYWORDS') {
+      if (!data.keywords) {
+        await sendMessage(from, 'What keywords should I include? Example:\n"set keywords remote, TypeScript, startup"');
+        return;
+      }
+      await setPreference(from, 'keywords', data.keywords);
+      await sendMessage(from, `✅ Keywords set to: *${data.keywords}*`);
+      return;
+    }
+
+    // --- START AUTO SEARCH ---
+    if (intent === 'START_AUTO_SEARCH') {
+      const prefs = await getPreferences(from);
+      if (!prefs || !prefs.job_title) {
+        await sendMessage(from, '⚠️ Set your job title first:\n"set my job title to React Developer"\n\nOptionally also set location and keywords.');
+        return;
+      }
+      await setPreference(from, 'active', true);
+      await sendMessage(
+        from,
+        `✅ Auto job search *enabled!*\n\n🔍 Searching every hour for: *${prefs.job_title}*${prefs.location ? ` in *${prefs.location}*` : ''}\n\nI'll send you job cards as I find new ones.\nReply *"apply JOB-XXX"* or *"skip JOB-XXX"* for each one.\n\nSay *"search now"* to run an immediate search.`
+      );
+      return;
+    }
+
+    // --- STOP AUTO SEARCH ---
+    if (intent === 'STOP_AUTO_SEARCH') {
+      await setPreference(from, 'active', false);
+      await sendMessage(from, '⏹ Auto job search *disabled*. Say "start auto search" to turn it back on.');
+      return;
+    }
+
+    // --- VIEW PREFERENCES ---
+    if (intent === 'VIEW_PREFERENCES') {
+      const prefs = await getPreferences(from);
+      if (!prefs) {
+        await sendMessage(from, 'No preferences set yet.\n\nTry:\n"set my job title to React Developer"\n"I\'m looking in Austin TX"\n"set keywords remote, startup"');
+        return;
+      }
+      await sendMessage(
+        from,
+        `⚙️ *Your Preferences*\n\n💼 Job title: ${prefs.job_title || 'not set'}\n📍 Location: ${prefs.location || 'not set'}\n🔑 Keywords: ${prefs.keywords || 'not set'}\n🤖 Auto search: ${prefs.active ? '✅ On' : '⏹ Off'}`
+      );
+      return;
+    }
+
+    // --- SEARCH NOW ---
+    if (intent === 'SEARCH_NOW') {
+      const prefs = await getPreferences(from);
+      if (!prefs || !prefs.job_title) {
+        await sendMessage(from, '⚠️ Set your job title first:\n"set my job title to React Developer"');
+        return;
+      }
+      await sendMessage(from, '🔍 Running job search now...');
+      await runAutoSearch(from, prefs);
+      return;
+    }
+
+    // --- APPLY JOB ---
+    if (intent === 'APPLY_JOB') {
+      if (!data.jobId) {
+        await sendMessage(from, 'Which job? Example: "apply JOB-007"');
+        return;
+      }
+      const numericId = parseInt(data.jobId.replace(/JOB-/i, ''), 10);
+
+      const { data: job, error } = await supabase
+        .from('pending_jobs')
+        .select('*')
+        .eq('id', numericId)
+        .eq('user_id', from)
+        .single();
+
+      if (error || !job) {
+        await sendMessage(from, `❌ Couldn't find *${data.jobId}*. Say "pending jobs" to see your list.`);
+        return;
+      }
+
+      await supabase
+        .from('pending_jobs')
+        .update({ status: 'applied', actioned_at: new Date().toISOString() })
+        .eq('id', numericId);
+
+      await addApplication(from, job.company, job.title, job.apply_link);
+      await sendMessage(from, `✅ Marked *${data.jobId}* as applied!\n\n🏢 ${job.company}\n💼 ${job.title}\n\nAdded to your tracker. Say "my applications" to see all.`);
+      return;
+    }
+
+    // --- SKIP JOB ---
+    if (intent === 'SKIP_JOB') {
+      if (!data.jobId) {
+        await sendMessage(from, 'Which job? Example: "skip JOB-003"');
+        return;
+      }
+      const numericId = parseInt(data.jobId.replace(/JOB-/i, ''), 10);
+
+      const { error } = await supabase
+        .from('pending_jobs')
+        .update({ status: 'skipped', actioned_at: new Date().toISOString() })
+        .eq('id', numericId)
+        .eq('user_id', from);
+
+      if (error) {
+        await sendMessage(from, `❌ Couldn't find *${data.jobId}*.`);
+        return;
+      }
+
+      await sendMessage(from, `↩️ Skipped *${data.jobId}*.`);
+      return;
+    }
+
+    // --- VIEW PENDING ---
+    if (intent === 'VIEW_PENDING') {
+      const { data: pending } = await supabase
+        .from('pending_jobs')
+        .select('id, title, company, sent_at')
+        .eq('user_id', from)
+        .eq('status', 'pending')
+        .order('sent_at', { ascending: false })
+        .limit(10);
+
+      if (!pending || pending.length === 0) {
+        await sendMessage(from, 'No pending jobs right now.\n\nSay *"search now"* or *"start auto search"* to find new ones.');
+        return;
+      }
+
+      const list = pending
+        .map(j => `🆔 *JOB-${String(j.id).padStart(3, '0')}*\n  ${j.title} @ ${j.company}`)
+        .join('\n\n');
+
+      await sendMessage(from, `📋 *Pending Jobs (${pending.length})*\n\n${list}\n\nReply *"apply JOB-XXX"* or *"skip JOB-XXX"*`);
+      return;
+    }
+
     // --- GENERAL CONVERSATION ---
     await addMessage(from, 'user', body);
     const history = await getHistory(from);
@@ -192,6 +338,5 @@ async function handleIncomingMessage(req, res) {
 
 module.exports = {
   handleIncomingMessage,
-  sendMessage,
   parseIncomingMessage,
 };
